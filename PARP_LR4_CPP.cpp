@@ -1,4 +1,4 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <omp.h>
 #include <stdio.h>
 #include <chrono>
@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <vector>
 using namespace std;
 
 const double PI = 3.141592653589793;
@@ -66,12 +67,15 @@ void TestTask1() {
 
 // Task 2
 //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+int nCores = 1;
+
 void TestTask2() {
 	// "Параллелизм150903_u.pdf", p. 159
 	// https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsysteminfo
 	SYSTEM_INFO si;
 	GetSystemInfo(&si);
 	printf("GetSystemInfo.dwNumberOfProcessors = %d\n", si.dwNumberOfProcessors);
+	nCores = (int)si.dwNumberOfProcessors;
 
 	// "Пз-4.pdf", p. 49
 	// https://learn.microsoft.com/en-us/cpp/parallel/openmp/reference/openmp-functions#omp-get-max-threads
@@ -214,6 +218,8 @@ void TestTask4() {
 // Task 5
 //-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 // https://en.cppreference.com/w/cpp/types/numeric_limits/epsilon
+int maxPrecN = 0;
+
 void TestTask5() {
 	const int maxN = 10000000;
 	double s = 0;
@@ -242,6 +248,138 @@ void TestTask5() {
 	}
 
 	cout << "value does not change after n = " << lastChange << endl;
+	maxPrecN = lastChange;
+}
+
+// Task 6
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+double NilakanthaPart(int from, int to) {
+	double s = 0;
+
+	for (int k = from; k < to; k++) {
+		double d = 2.0 * k;
+		double t = 4.0 / (d * (d + 1) * (d + 2));
+
+		s += (k % 2 == 1) ? t : -t;
+	}
+
+	return s;
+}
+
+struct ThreadPart {
+	int from;
+	int to;
+	double sum;
+};
+
+// https://learn.microsoft.com/en-us/windows/win32/procthread/creating-threads
+DWORD WINAPI ThreadProc(LPVOID param) {
+	ThreadPart* part = (ThreadPart*)param;
+	part->sum = NilakanthaPart(part->from, part->to);
+	return 0;
+}
+
+double CalcPiWinThreads(int n, int nThreads) {
+	vector<ThreadPart> parts(nThreads);
+	vector<HANDLE> threads(nThreads);
+	int chunk = n / nThreads;
+
+	for (int i = 0; i < nThreads; i++) {
+		parts[i].from = 1 + i * chunk;
+		parts[i].to = parts[i].from + chunk;
+		threads[i] = CreateThread(NULL, 0, ThreadProc, &parts[i], 0, NULL);
+	}
+	parts[nThreads - 1].to = n + 1;
+
+	WaitForMultipleObjects(nThreads, threads.data(), TRUE, INFINITE);
+
+	double s = 0;
+	for (int i = 0; i < nThreads; i++) {
+		CloseHandle(threads[i]);
+		s += parts[i].sum;
+	}
+
+	return 3 + s;
+}
+
+struct Result {
+	double pi;
+	double time;
+};
+
+template <class Function>
+Result Measure(Function&& calcPi, int n) {
+	volatile int vn = n;
+	volatile double pi = 0;
+	int repeat = n >= 10000000 ? 3 : 20;
+
+	double time = GetMinTime([&] { pi = calcPi(vn); }, repeat);
+
+	return { pi, time };
+}
+
+Result RunSequential(int n) {
+	return Measure(CalcPiNilakantha, n);
+}
+
+Result RunWindows(int n) {
+	return Measure([](int m) { return CalcPiWinThreads(m, nCores); }, n);
+}
+
+void TestTask6() {
+	Result seq = RunSequential(maxPrecN);
+	Result win = RunWindows(maxPrecN);
+
+	cout << "threads = " << nCores << "   n = " << maxPrecN << endl;
+	PrintPi("sequential: ", seq.pi, seq.time);
+	PrintPi("windows:    ", win.pi, win.time);
+}
+
+// Task 8
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+// https://learn.microsoft.com/en-us/cpp/parallel/openmp/reference/openmp-clauses#reduction
+double CalcPiOmp(int n, int nThreads) {
+	double s = 0;
+
+#pragma omp parallel for reduction(+: s) num_threads(nThreads)
+	for (int k = 1; k <= n; k++) {
+		double d = 2.0 * k;
+		double t = 4.0 / (d * (d + 1) * (d + 2));
+
+		s += (k % 2 == 1) ? t : -t;
+	}
+
+	return 3 + s;
+}
+
+Result RunOpenMP(int n) {
+	return Measure([](int m) { return CalcPiOmp(m, nCores); }, n);
+}
+
+void TestTask8() {
+	Result seq = RunSequential(maxPrecN);
+	Result omp = RunOpenMP(maxPrecN);
+
+	cout << "threads = " << nCores << "   n = " << maxPrecN << endl;
+	PrintPi("sequential: ", seq.pi, seq.time);
+	PrintPi("openmp:     ", omp.pi, omp.time);
+}
+
+// Task 9
+//-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+void TestTask9() {
+	const int sizes[] = { maxPrecN, 1000000, 10000000, 100000000 };
+
+	cout << "        n   speedup windows   speedup openmp" << endl;
+	for (int n : sizes) {
+		double seqTime = RunSequential(n).time;
+		double winTime = RunWindows(n).time;
+		double ompTime = RunOpenMP(n).time;
+
+		cout << setw(9) << n << setprecision(2)
+			<< setw(18) << seqTime / winTime
+			<< setw(17) << seqTime / ompTime << endl;
+	}
 }
 
 int main() {
@@ -261,6 +399,15 @@ int main() {
 
 	cout << "\nTask 5 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n";
 	TestTask5();
+
+	cout << "\nTask 6 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n";
+	TestTask6();
+
+	cout << "\nTask 8 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n";
+	TestTask8();
+
+	cout << "\nTask 9 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=\n";
+	TestTask9();
 
 	cout << endl;
 
